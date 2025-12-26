@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Zero-Player RTS: Debugged & Smooth</title>
+<style>
+    body { margin: 0; overflow: hidden; background: #111; font-family: 'Segoe UI', sans-serif; user-select: none; }
+    canvas { display: block; }
+    #ui { position: absolute; top: 10px; left: 10px; right: 10px; display: flex; justify-content: space-between; pointer-events: none; gap: 20px; }
+    .card { background: rgba(18,18,18,0.95); border: 1px solid #444; border-top: 4px solid #fff; padding: 15px; border-radius: 6px; min-width: 200px; pointer-events: auto; box-shadow: 0 4px 12px rgba(0,0,0,0.5); }
+    .head { font-weight: 900; text-align: center; border-bottom: 2px solid; margin-bottom: 10px; padding-bottom: 5px; font-size: 18px; letter-spacing: 1px; }
+    .stat { font-size: 13px; margin: 4px 0; display: flex; justify-content: space-between; font-weight: 600; color: #aaa; }
+    .stat span { color: #fff; font-weight: 400; }
+    #controls { position: absolute; bottom: 30px; left: 50%; transform: translateX(-50%); display: flex; gap: 10px; pointer-events: auto; background: rgba(0,0,0,0.5); padding: 10px; border-radius: 8px; }
+    button { background: #333; color: #ddd; border: 1px solid #555; padding: 10px 20px; border-radius: 4px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+    button:hover { background: #444; transform: translateY(-2px); }
+    button.active { background: #eee; color: #111; border-color: #fff; box-shadow: 0 0 10px #fff; }
+</style>
+</head>
+<body>
+
+<div id="ui">
+    <div class="card" style="border-color: #e74c3c">
+        <div class="head" style="color:#e74c3c; border-color:#e74c3c;">RED EMPIRE</div>
+        <div class="stat">Population <span id="r-pop">0/10</span></div>
+        <div class="stat" style="color:#e74c3c">Food <span id="r-food">0</span></div>
+        <div class="stat" style="color:#2ecc71">Wood <span id="r-wood">0</span></div>
+        <div class="stat" style="color:#95a5a6">Stone <span id="r-stone">0</span></div>
+        <div class="stat" style="color:#9b59b6">Iron <span id="r-iron">0</span></div>
+        <div class="stat" style="margin-top:8px; border-top:1px solid #444; padding-top:5px; color:#f39c12">Swords <span id="r-swords">0</span></div>
+        <div class="stat" style="color:#3498db">Guns <span id="r-guns">0</span></div>
+    </div>
+    <div class="card" style="border-color: #3498db">
+        <div class="head" style="color:#3498db; border-color:#3498db;">BLUE REPUBLIC</div>
+        <div class="stat">Population <span id="b-pop">0/10</span></div>
+        <div class="stat" style="color:#e74c3c">Food <span id="b-food">0</span></div>
+        <div class="stat" style="color:#2ecc71">Wood <span id="b-wood">0</span></div>
+        <div class="stat" style="color:#95a5a6">Stone <span id="b-stone">0</span></div>
+        <div class="stat" style="color:#9b59b6">Iron <span id="b-iron">0</span></div>
+        <div class="stat" style="margin-top:8px; border-top:1px solid #444; padding-top:5px; color:#f39c12">Swords <span id="b-swords">0</span></div>
+        <div class="stat" style="color:#3498db">Guns <span id="b-guns">0</span></div>
+    </div>
+</div>
+
+<div id="controls">
+    <button id="btn-pause">PAUSE</button>
+    <button id="btn-1x" class="active">1x</button>
+    <button id="btn-2x">2x</button>
+    <button id="btn-5x">MAX</button>
+</div>
+
+<canvas id="c"></canvas>
+
+<script>
+// --- CONFIGURATION ---
+const C = {
+    SPAWN: { FOOD: 50, WOOD: 50, STONE: 10 },
+    HOUSE_COST: 80,
+    SWORD_COST: 30, GUN_COST: 60,
+    SPAWN_TIME: 60, HOUSE_TIME: 100,
+    CAPACITY: 15,
+    BASE_POP: 10, HOUSE_POP: 5, MAX_UNITS: 200,
+    HP_UNIT: 60, HP_HOUSE: 250, HP_TC: 1500,
+    DMG: { FIST: 3, SWORD: 10, GUN: 25 },
+    RNG: { MELEE: 22, GUN: 130 },
+    CD: { MELEE: 40, GUN: 90 },
+    VISION: 250,
+    INIT_RES: 180, INIT_SHEEP: 40
+};
+
+const TEAMS = {
+    RED: { hex: '#e74c3c', roof: '#922b21' },
+    BLUE: { hex: '#3498db', roof: '#1f618d' }
+};
+
+const S = { IDLE:0, MOVE:1, GATHER:2, DEPOSIT:3, BUILD:4, CHASE:5, ATTACK:6, WANDER:7 };
+
+let SPEED = 1.0;
+let TIME = 0;
+
+// --- MATH (NaN Safety Added) ---
+class Vec {
+    constructor(x,y){this.x=x;this.y=y;}
+    add(v){return new Vec(this.x+v.x,this.y+v.y);}
+    sub(v){return new Vec(this.x-v.x,this.y-v.y);}
+    mult(n){return new Vec(this.x*n,this.y*n);}
+    mag(){return Math.hypot(this.x,this.y);}
+    norm(){
+        let m=this.mag(); 
+        // FIX: Prevent divide by zero (NaN errors)
+        if (m < 0.001) return new Vec(0,0);
+        return new Vec(this.x/m,this.y/m);
+    }
+    dist(v){return Math.hypot(this.x-v.x,this.y-v.y);}
+}
+
+// --- ENTITIES ---
+class Entity {
+    constructor(x,y,r) {
+        this.pos = new Vec(x,y);
+        this.r = r;
+        this.dead = false;
+        this.z = y;
+    }
+}
+
+class Resource extends Entity {
+    constructor(x,y,type) {
+        super(x,y,type==='SHEEP'?10:14);
+        this.type=type;
+        this.amt=type==='SHEEP'?60:150;
+        this.max=this.amt;
+        if(type==='SHEEP') {
+            this.vel = new Vec(Math.random()-0.5,Math.random()-0.5).norm().mult(0.3);
+            this.moveT = 0;
+        }
+    }
+    update(g) {
+        if(this.type==='SHEEP' && SPEED>0) {
+            this.moveT+=SPEED;
+            if(this.moveT>100) { this.vel=new Vec(Math.random()-0.5,Math.random()-0.5).norm().mult(0.3); this.moveT=0; }
+            this.pos=this.pos.add(this.vel.mult(SPEED));
+            if(this.pos.x<20||this.pos.x>g.w-20) this.vel.x*=-1;
+            if(this.pos.y<20||this.pos.y>g.h-20) this.vel.y*=-1;
+            this.z=this.pos.y;
+        }
+    }
+    draw(ctx) {
+        let s = 0.4 + 0.6*(this.amt/this.max);
+        ctx.save(); ctx.translate(this.pos.x,this.pos.y); ctx.scale(s,s);
+        ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(0,5,this.r,this.r*0.4,0,0,6.28); ctx.fill();
+        
+        if(this.type==='WOOD') {
+            ctx.fillStyle='#5d4037'; ctx.fillRect(-3,0,6,8);
+            ctx.fillStyle='#27ae60'; 
+            ctx.beginPath(); ctx.moveTo(0,-18); ctx.lineTo(12,4); ctx.lineTo(-12,4); ctx.fill();
+            ctx.beginPath(); ctx.moveTo(0,-10); ctx.lineTo(10,8); ctx.lineTo(-10,8); ctx.fill();
+        } else if(this.type==='STONE') {
+            ctx.fillStyle='#7f8c8d'; ctx.beginPath(); ctx.arc(0,0,this.r,0,6.28); ctx.fill();
+            ctx.fillStyle='#95a5a6'; ctx.beginPath(); ctx.arc(-3,-3,4,0,6.28); ctx.fill();
+        } else if(this.type==='IRON') {
+            ctx.fillStyle='#2c3e50'; ctx.beginPath(); ctx.arc(0,0,this.r,0,6.28); ctx.fill();
+            ctx.fillStyle='#9b59b6'; ctx.beginPath(); ctx.moveTo(-4,-4); ctx.lineTo(4,-4); ctx.lineTo(0,6); ctx.fill();
+        } else if(this.type==='SHEEP') {
+            if(this.vel.x<0) ctx.scale(-1,1);
+            ctx.fillStyle='#ecf0f1'; ctx.beginPath(); ctx.arc(0,0,8,0,6.28); ctx.fill();
+            ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(6,-3,4,0,6.28); ctx.fill(); 
+            let l=Math.sin(TIME*0.2)*2; ctx.fillRect(-4+l,6,2,4); ctx.fillRect(4-l,6,2,4);
+        }
+        ctx.restore();
+    }
+}
+
+class Building extends Entity {
+    constructor(x,y,r,team,hp) { super(x,y,r); this.team=team; this.hp=hp; this.maxHp=hp; }
+    hit(dmg, g) {
+        this.hp -= dmg;
+        g.fx(this.pos.x, this.pos.y, '#e67e22', 2);
+        if(this.hp<=0) { this.dead=true; g.fx(this.pos.x, this.pos.y, '#555', 8); }
+    }
+    drawHp(ctx) {
+        if(this.hp<this.maxHp) {
+            ctx.fillStyle='#000'; ctx.fillRect(this.pos.x-12, this.pos.y-this.r-8, 24, 4);
+            ctx.fillStyle=this.hp/this.maxHp < 0.3 ? '#e74c3c' : '#2ecc71'; 
+            ctx.fillRect(this.pos.x-11, this.pos.y-this.r-7, 22*(this.hp/this.maxHp), 2);
+        }
+    }
+}
+
+class TC extends Building {
+    constructor(x,y,team) { super(x,y,25,team,C.HP_TC); this.res = {FOOD:0, WOOD:0, STONE:0, IRON:0}; this.spawnT = 0; }
+    draw(ctx) {
+        ctx.save(); ctx.translate(this.pos.x, this.pos.y);
+        ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(0,10,25,8,0,0,6.28); ctx.fill();
+        ctx.fillStyle='#7f8c8d'; ctx.fillRect(-20,-20,40,40);
+        ctx.fillStyle=TEAMS[this.team].roof; ctx.beginPath(); ctx.moveTo(-24,-20); ctx.lineTo(24,-20); ctx.lineTo(0,-35); ctx.fill();
+        ctx.fillStyle=TEAMS[this.team].hex; ctx.fillRect(0,-45,12,8); ctx.fillStyle='#ccc'; ctx.fillRect(0,-45,2,10);
+        ctx.restore(); this.drawHp(ctx);
+    }
+}
+
+class House extends Building {
+    constructor(x,y,team) { super(x,y,15,team,C.HP_HOUSE); }
+    draw(ctx) {
+        ctx.save(); ctx.translate(this.pos.x, this.pos.y);
+        ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(0,5,15,5,0,0,6.28); ctx.fill();
+        ctx.fillStyle='#d35400'; ctx.fillRect(-10,-10,20,20);
+        ctx.fillStyle=TEAMS[this.team].roof; ctx.beginPath(); ctx.moveTo(-12,-10); ctx.lineTo(12,-10); ctx.lineTo(0,-22); ctx.fill();
+        ctx.restore(); this.drawHp(ctx);
+    }
+}
+
+class Site extends Entity {
+    constructor(x,y,team) { super(x,y,15); this.team=team; this.prog=0; }
+    draw(ctx) {
+        ctx.save(); ctx.translate(this.pos.x, this.pos.y);
+        ctx.strokeStyle=TEAMS[this.team].hex; ctx.setLineDash([4,4]); ctx.strokeRect(-10,-10,20,20);
+        ctx.fillStyle='#0f0'; ctx.fillRect(-10,12,20*(this.prog/C.HOUSE_TIME),3);
+        ctx.restore();
+    }
+}
+
+// --- UPDATED UNIT CLASS (Fixes Applied) ---
+class Unit extends Entity {
+    constructor(x,y,team) {
+        super(x,y,8);
+        this.team=team;
+        this.hp=C.HP_UNIT;
+        this.state=S.IDLE;
+        this.ent=null; 
+        this.dest=null;
+        this.weap='FIST';
+        this.inv={type:null,amt:0};
+        this.cd=0;
+        this.animOff = Math.random()*10;
+        
+        // FIX: Target Lock Timer (Prevents rapid state switching)
+        this.lock = 0; 
+    }
+    
+    update(g) {
+        // Decrease lock timer
+        if(this.lock > 0) this.lock -= SPEED;
+
+        // --- PHYSICS FIX: Combine Separation + Seek ---
+        let separation = new Vec(0,0);
+        let count = 0;
+        // Check neighbors for separation
+        for(let u of g.units) {
+            if(u === this) continue;
+            let d = this.pos.dist(u.pos);
+            if(d < 16 && d > 0) { // 16px bubble
+                let push = this.pos.sub(u.pos).norm();
+                separation = separation.add(push);
+                count++;
+            }
+        }
+        if(count > 0) separation = separation.mult(1.5); // Weight of separation
+
+        // Determine seek vector based on state
+        let seek = new Vec(0,0);
+        let targetPos = null;
+
+        if (this.state === S.MOVE || this.state === S.CHASE || this.state === S.GATHER || this.state === S.DEPOSIT || this.state === S.BUILD || this.state === S.ATTACK) {
+            if (this.ent && !this.ent.dead) targetPos = this.ent.pos;
+        } else if (this.state === S.WANDER && this.dest) {
+            targetPos = this.dest;
+        }
+
+        if (targetPos) {
+            seek = targetPos.sub(this.pos).norm();
+        }
+
+        // Combine Forces (Seek is dominant, separation is modifier)
+        let finalDir = seek.add(separation).norm();
+        let moveSpeed = 1.2 * SPEED;
+        
+        // Actually move
+        if (targetPos || count > 0) {
+            this.pos = this.pos.add(finalDir.mult(moveSpeed));
+        }
+
+        // --- LOGIC ---
+        switch(this.state) {
+            case S.IDLE: this.findJob(g); break;
+            case S.MOVE: this.checkArrival(this.ent, S.GATHER, g); break;
+            case S.GATHER: this.gather(g); break;
+            case S.DEPOSIT: this.checkArrival(this.ent, -1, g); if(this.ent && this.pos.dist(this.ent.pos)<50) this.deposit(g); break;
+            case S.BUILD: this.build(g); break;
+            case S.CHASE: this.chase(g); break;
+            case S.ATTACK: this.attack(g); break;
+            case S.WANDER: 
+                if(!this.dest || this.pos.dist(this.dest)<10) { this.state=S.IDLE; this.lock=0; }
+                if(this.scan(g)) this.state=S.CHASE;
+                break;
+        }
+        this.z = this.pos.y;
+    }
+
+    findJob(g) {
+        if(this.scan(g)) { this.state=S.CHASE; return; }
+        if(this.lock > 0) return; // Don't switch jobs if locked (unless enemy found)
+
+        let tc = this.team==='RED'?g.redTC:g.blueTC;
+        if(tc.dead) { this.dest=this.pos; this.state=S.WANDER; return; }
+
+        let myPop = g.units.filter(u=>u.team===this.team).length;
+        let myCap = C.BASE_POP + g.houses.filter(h=>h.team===this.team).length * C.HOUSE_POP;
+        
+        let site = g.sites.find(s=>s.team===this.team);
+        if(site) { this.ent=site; this.state=S.MOVE; this.lock=60; return; }
+
+        let type = 'WOOD';
+        if(myPop >= myCap - 2) type = 'WOOD';
+        else if(tc.res.FOOD < C.SPAWN.FOOD) type='SHEEP';
+        else if(tc.res.STONE < C.SWORD_COST) type='STONE';
+        else if(tc.res.IRON < C.GUN_COST) type='IRON';
+        else if(Math.random()>0.7) type='WOOD';
+        
+        let best=null, dist=9999;
+        let list = type==='SHEEP' ? g.sheep : g.res.filter(r=>r.type===type);
+        if(list.length===0) list = g.res; 
+
+        for(let r of list) {
+            if(r.dead) continue;
+            let d = this.pos.dist(r.pos);
+            if(d<dist) { dist=d; best=r; }
+        }
+
+        if(best) { 
+            this.ent=best; 
+            this.state=S.MOVE; 
+            this.lock = 100; // Commit to this resource for ~1.5s
+        }
+        else {
+            this.dest = this.pos.add(new Vec(Math.random()*100-50, Math.random()*100-50));
+            this.state = S.WANDER;
+            this.lock = 60;
+        }
+    }
+
+    scan(g) {
+        // Combat scan has priority
+        let best=null, dist=C.VISION;
+        for(let u of g.units) {
+            if(u.team!==this.team && !u.dead) {
+                let d = this.pos.dist(u.pos);
+                if(d<dist) { dist=d; best=u; }
+            }
+        }
+        if(!best) {
+            let targets = [...g.houses, g.redTC, g.blueTC];
+            for(let b of targets) {
+                if(b.team!==this.team && !b.dead) {
+                    let d = this.pos.dist(b.pos);
+                    if(d<dist) { dist=d; best=b; }
+                }
+            }
+        }
+        if(best) { this.ent = best; return true; }
+        return false;
+    }
+
+    checkArrival(target, nextState, g) {
+        if(this.scan(g)) { this.state=S.CHASE; return; }
+        if(!target || target.dead) { this.state=S.IDLE; this.lock=0; return; }
+        
+        // FIX: Increased Buffer Zone (+15)
+        let range = target.r + this.r + 15; 
+        
+        if(this.pos.dist(target.pos) < range) {
+            if(nextState !== -1) this.state = nextState;
+        } 
+        // Movement is handled in update() now via physics
+    }
+
+    gather(g) {
+        if(this.scan(g)) { this.state=S.CHASE; return; }
+        if(!this.ent || this.ent.dead) { this.state=S.IDLE; this.lock=0; return; }
+        
+        this.cd += SPEED;
+        if(this.cd > 15) {
+            this.cd = 0;
+            if(this.inv.amt===0) this.inv.type = this.ent.type==='SHEEP'?'FOOD':this.ent.type;
+            this.ent.amt -= 5;
+            this.inv.amt += 5;
+            if(this.ent.type==='SHEEP') g.fx(this.ent.pos.x,this.ent.pos.y,'#c0392b',2); 
+            
+            if(this.ent.amt<=0) { this.ent.dead=true; this.state=S.DEPOSIT; this.ent = (this.team==='RED'?g.redTC:g.blueTC); }
+            if(this.inv.amt>=C.CAPACITY) { this.state=S.DEPOSIT; this.ent = (this.team==='RED'?g.redTC:g.blueTC); }
+        }
+    }
+
+    deposit(g) {
+        let tc = this.ent;
+        if(tc.dead) return;
+        tc.res[this.inv.type] += this.inv.amt;
+        g.float(this.pos.x, this.pos.y-10, "+"+this.inv.amt, '#fff');
+        this.inv.amt=0; 
+        this.state=S.IDLE;
+        this.lock=0;
+    }
+
+    chase(g) {
+        if(!this.ent || this.ent.dead) { this.state=S.IDLE; this.lock=0; return; }
+        let d = this.pos.dist(this.ent.pos);
+        let rng = (this.weap==='GUN'?C.RNG.GUN:C.RNG.MELEE) + this.ent.r;
+        
+        if(d <= rng) this.state = S.ATTACK;
+        // else physics moves us closer
+    }
+
+    attack(g) {
+        if(!this.ent || this.ent.dead) { this.state=S.IDLE; this.lock=0; return; }
+        let d = this.pos.dist(this.ent.pos);
+        let rng = (this.weap==='GUN'?C.RNG.GUN:C.RNG.MELEE) + this.ent.r + 10;
+        
+        if(d > rng) { this.state=S.CHASE; return; }
+
+        this.cd += SPEED;
+        let limit = this.weap==='GUN'?C.CD.GUN:C.CD.MELEE;
+        
+        if(this.cd > limit) {
+            this.cd = 0;
+            let dmg = C.DMG[this.weap];
+            if(this.weap==='GUN') {
+                g.bullet(this.pos, this.ent, dmg);
+                // Simple Recoil
+                let recoil = this.ent.pos.sub(this.pos).norm().mult(-2);
+                this.pos = this.pos.add(recoil);
+            } else {
+                this.ent.hit(dmg, g);
+            }
+        }
+    }
+
+    build(g) {
+        if(!this.ent || this.ent.dead) { this.state=S.IDLE; this.lock=0; return; }
+        this.cd += SPEED;
+        if(this.cd > 1) {
+            this.ent.prog++;
+            this.cd = 0;
+            if(this.ent.prog >= C.HOUSE_TIME) {
+                g.addHouse(this.ent.pos.x, this.ent.pos.y, this.team);
+                this.ent.dead=true;
+                this.state=S.IDLE;
+                this.lock=0;
+            }
+        }
+    }
+
+    hit(dmg, g) {
+        this.hp -= dmg;
+        g.fx(this.pos.x, this.pos.y, '#c0392b', 4);
+        if(this.hp<=0) {
+            this.dead=true;
+            g.corpses.push(new Corpse(this.pos.x, this.pos.y));
+        }
+    }
+
+    draw(ctx) {
+        ctx.save(); ctx.translate(this.pos.x, this.pos.y);
+        ctx.fillStyle='rgba(0,0,0,0.3)'; ctx.beginPath(); ctx.ellipse(0,4,6,3,0,0,6.28); ctx.fill();
+        ctx.fillStyle = TEAMS[this.team].hex; ctx.fillRect(-3,-4,6,8);
+        
+        let move = (this.state===S.MOVE||this.state===S.CHASE||this.state===S.WANDER);
+        let l = move ? Math.sin((TIME+this.animOff)*0.4)*3 : 0;
+        ctx.strokeStyle='#222'; ctx.lineWidth=2; 
+        ctx.beginPath(); ctx.moveTo(-2,4); ctx.lineTo(-2-l,10); ctx.stroke();
+        ctx.beginPath(); ctx.moveTo(2,4); ctx.lineTo(2+l,10); ctx.stroke();
+
+        ctx.fillStyle = '#f5cba7'; ctx.beginPath(); ctx.arc(0,-6,4,0,6.28); ctx.fill();
+
+        if(this.state===S.ATTACK) ctx.rotate(Math.sin(TIME*0.5)*0.5);
+        ctx.translate(3,0);
+        if(this.weap==='GUN') {
+            ctx.fillStyle='#111'; ctx.fillRect(0,-2,12,3);
+        } else if(this.weap==='SWORD') {
+            ctx.fillStyle='#bdc3c7'; ctx.fillRect(0,-8,2,12);
+        }
+        
+        if(this.inv.amt>0) {
+            ctx.fillStyle = this.inv.type==='FOOD'?'#e74c3c':'#888';
+            ctx.beginPath(); ctx.arc(-6,4,3,0,6.28); ctx.fill();
+        }
+        ctx.restore();
+        
+        if(this.hp < C.HP_UNIT) {
+            ctx.fillStyle='red'; ctx.fillRect(this.pos.x-6, this.pos.y-16, 12, 2);
+            ctx.fillStyle='#2ecc71'; ctx.fillRect(this.pos.x-6, this.pos.y-16, 12*(this.hp/C.HP_UNIT), 2);
+        }
+    }
+}
+
+class Corpse extends Entity {
+    constructor(x,y){super(x,y,6); this.life=1;}
+    update(){this.life-=0.005*SPEED; if(this.life<=0) this.dead=true;}
+    draw(ctx){
+        ctx.globalAlpha=this.life;
+        ctx.fillStyle='#7f8c8d'; ctx.beginPath(); ctx.arc(this.pos.x,this.pos.y,5,0,6.28); ctx.fill();
+        ctx.fillStyle='#c0392b'; ctx.beginPath(); ctx.arc(this.pos.x,this.pos.y+2,4,0,6.28); ctx.fill();
+        ctx.globalAlpha=1;
+    }
+}
+
+// --- GAME ---
+class Game {
+    constructor() {
+        this.c = document.getElementById('c');
+        this.ctx = this.c.getContext('2d');
+        this.resize(); window.onresize=()=>this.resize();
+        
+        this.res=[]; this.sheep=[]; this.units=[]; this.houses=[]; this.sites=[]; 
+        this.fxs=[]; this.txts=[]; this.projs=[]; this.corpses=[];
+        
+        this.redTC = new TC(this.w*0.3, this.h/2, 'RED');
+        this.blueTC = new TC(this.w*0.7, this.h/2, 'BLUE');
+        
+        for(let i=0;i<C.INIT_RES;i++) this.spawnRes();
+        for(let i=0;i<C.INIT_SHEEP;i++) this.spawnSheep();
+        for(let i=0;i<6;i++) {
+            this.units.push(new Unit(this.redTC.pos.x, this.redTC.pos.y+40, 'RED'));
+            this.units.push(new Unit(this.blueTC.pos.x, this.blueTC.pos.y+40, 'BLUE'));
+        }
+
+        this.ui = { red: this.bindUI('r'), blue: this.bindUI('b') };
+        requestAnimationFrame(()=>this.loop());
+    }
+    
+    bindUI(p) {
+        return {
+            pop: document.getElementById(p+'-pop'),
+            food: document.getElementById(p+'-food'),
+            wood: document.getElementById(p+'-wood'),
+            stone: document.getElementById(p+'-stone'),
+            iron: document.getElementById(p+'-iron'),
+            swords: document.getElementById(p+'-swords'),
+            guns: document.getElementById(p+'-guns')
+        };
+    }
+
+    resize(){this.w=this.c.width=innerWidth; this.h=this.c.height=innerHeight;}
+    
+    spawnRes() {
+        let x,y,t,safe=false;
+        while(!safe) {
+            x=Math.random()*this.w; y=Math.random()*this.h;
+            if(this.redTC.pos.dist({x:x,y:y})<100) continue;
+            if(this.blueTC.pos.dist({x:x,y:y})<100) continue;
+            if(Math.abs(x-this.w/2)<50) continue; 
+            let r=Math.random();
+            if(r<0.5) t='WOOD'; else if(r<0.8) t='STONE'; else t='IRON';
+            safe=true;
+        }
+        this.res.push(new Resource(x,y,t));
+    }
+    
+    spawnSheep(){this.sheep.push(new Resource(Math.random()*this.w,Math.random()*this.h,'SHEEP'));}
+    fx(x,y,c,s){this.fxs.push({x:x,y:y,vx:(Math.random()-0.5)*3,vy:(Math.random()-0.5)*3,l:1,c:c,s:s});}
+    float(x,y,t,c){this.txts.push({x:x,y:y,t:t,c:c,l:1});}
+    bullet(pos,tar,dmg){this.projs.push({pos:pos, vel:tar.pos.sub(pos).norm().mult(8), tar:tar, dmg:dmg, l:60});}
+    addHouse(x,y,t){this.houses.push(new House(x,y,t));}
+
+    update() {
+        TIME+=SPEED;
+        
+        [this.redTC, this.blueTC].forEach(tc => {
+            if(tc.dead) return;
+            let team = tc.team;
+            let myU = this.units.filter(u=>u.team===team);
+            let cap = C.BASE_POP + (this.houses.filter(h=>h.team===team).length * C.HOUSE_POP);
+            
+            // Spawn
+            if(myU.length<cap && myU.length<C.MAX_UNITS && tc.res.FOOD>=C.SPAWN.FOOD && tc.res.WOOD>=C.SPAWN.WOOD) {
+                tc.spawnT+=SPEED;
+                if(tc.spawnT>C.SPAWN_TIME) {
+                    tc.spawnT=0; tc.res.FOOD-=C.SPAWN.FOOD; tc.res.WOOD-=C.SPAWN.WOOD; tc.res.STONE-=C.SPAWN.STONE;
+                    this.units.push(new Unit(tc.pos.x, tc.pos.y+30, team));
+                }
+            }
+            // Equip
+            let noob = myU.filter(u=>u.weap==='FIST');
+            if(noob.length) {
+                if(tc.res.IRON>=C.GUN_COST) { tc.res.IRON-=C.GUN_COST; noob[0].weap='GUN'; }
+                else if(tc.res.STONE>=C.SWORD_COST) { tc.res.STONE-=C.SWORD_COST; noob[0].weap='SWORD'; }
+            }
+            // Build
+            let sites = this.sites.filter(s=>s.team===team);
+            if((myU.length>=cap-2 || tc.res.WOOD>300) && tc.res.WOOD>=C.HOUSE_COST && sites.length<2) {
+                for(let k=0;k<20;k++) {
+                    let ang = Math.random()*6.28;
+                    let bx = tc.pos.x+Math.cos(ang)*100, by=tc.pos.y+Math.sin(ang)*100;
+                    if(bx>20 && bx<this.w-20 && by>20 && by<this.h-20 && Math.abs(bx-this.w/2)>80) {
+                        tc.res.WOOD-=C.HOUSE_COST;
+                        this.sites.push(new Site(bx,by,team));
+                        break;
+                    }
+                }
+            }
+        });
+
+        [...this.units, ...this.sheep, ...this.res, ...this.corpses].forEach(e=>e.update(this));
+        
+        this.projs.forEach(p => {
+            p.pos = p.pos.add(p.vel.mult(SPEED));
+            p.l -= SPEED;
+            if(p.l<=0) p.dead=true;
+            if(p.pos.dist(p.tar.pos) < 15) { p.tar.hit(p.dmg, this); p.dead=true; }
+        });
+        
+        this.units=this.units.filter(u=>!u.dead);
+        this.res=this.res.filter(r=>!r.dead);
+        this.sheep=this.sheep.filter(s=>!s.dead);
+        this.sites=this.sites.filter(s=>!s.dead);
+        this.houses=this.houses.filter(h=>!h.dead);
+        this.projs=this.projs.filter(p=>!p.dead);
+        this.corpses=this.corpses.filter(c=>!c.dead);
+        
+        this.fxs.forEach(f=>{ f.x+=f.vx; f.y+=f.vy; f.l-=0.05*SPEED; });
+        this.fxs=this.fxs.filter(f=>f.l>0);
+        this.txts.forEach(t=>{ t.y-=0.5*SPEED; t.l-=0.02*SPEED; });
+        this.txts=this.txts.filter(t=>t.l>0);
+        
+        if(Math.random()<0.02*SPEED && this.sheep.length<50) this.spawnSheep();
+        
+        this.draw();
+        this.updateUI();
+    }
+    
+    updateUI() {
+        let set = (t, tc, ui) => {
+            let u = this.units.filter(u=>u.team===t);
+            let h = this.houses.filter(h=>h.team===t);
+            let cap = C.BASE_POP + (h.length * C.HOUSE_POP);
+            ui.pop.innerText = u.length + "/" + cap;
+            ui.food.innerText = Math.floor(tc.res.FOOD);
+            ui.wood.innerText = Math.floor(tc.res.WOOD);
+            ui.stone.innerText = Math.floor(tc.res.STONE);
+            ui.iron.innerText = Math.floor(tc.res.IRON);
+            ui.swords.innerText = u.filter(u=>u.weap==='SWORD').length;
+            ui.guns.innerText = u.filter(u=>u.weap==='GUN').length;
+        };
+        set('RED', this.redTC, this.ui.red);
+        set('BLUE', this.blueTC, this.ui.blue);
+    }
+
+    draw() {
+        this.ctx.fillStyle='#111'; this.ctx.fillRect(0,0,this.w,this.h);
+        
+        let all = [...this.res, ...this.sheep, ...this.sites, ...this.houses, ...this.corpses, this.redTC, this.blueTC, ...this.units];
+        all.sort((a,b)=>a.pos.y-b.pos.y);
+        
+        all.forEach(e=>e.draw(this.ctx));
+        
+        this.ctx.strokeStyle='#ff0'; this.ctx.lineWidth=2;
+        this.projs.forEach(p=>{
+            this.ctx.beginPath(); this.ctx.moveTo(p.pos.x,p.pos.y); 
+            this.ctx.lineTo(p.pos.x-p.vel.x, p.pos.y-p.vel.y); this.ctx.stroke();
+        });
+        
+        this.fxs.forEach(f=>{
+            this.ctx.globalAlpha=f.l; this.ctx.fillStyle=f.c; this.ctx.fillRect(f.x,f.y,f.s,f.s);
+        });
+        this.ctx.globalAlpha=1;
+        
+        this.txts.forEach(t=>{
+            this.ctx.globalAlpha=t.l; this.ctx.fillStyle=t.c; this.ctx.font='bold 12px Arial'; this.ctx.fillText(t.t,t.x,t.y);
+        });
+        this.ctx.globalAlpha=1;
+    }
+    
+    loop() {
+        let n = Math.ceil(SPEED);
+        let sub = SPEED/n;
+        let realS = SPEED;
+        SPEED = sub;
+        for(let i=0;i<n;i++) this.update();
+        SPEED = realS;
+        requestAnimationFrame(()=>this.loop());
+    }
+}
+
+function setSpeed(s) {
+    SPEED = s;
+    document.querySelectorAll('button').forEach((b,i) => {
+        b.className = [0,1,2,5][i]===s ? 'active' : '';
+    });
+}
+
+new Game();
+</script>
+</body>
+</html>
