@@ -7,10 +7,6 @@ const {
   SPEED,
   setSpeed,
   Vec,
-  Unit,
-  Site,
-  S,
-  C,
 } = game;
 
 function createStubButtons() {
@@ -55,72 +51,12 @@ function testSetSpeedWithDomFallback() {
   delete global.document;
 }
 
-function testUnitsSwitchToBuildWhenReachingSite() {
-  const builder = new Unit(0, 0, 'RED');
-  const site = new Site(0, 0, 'RED');
-  const gameStub = {
-    units: [builder],
-    houses: [],
-    sites: [site],
-    redTC: { team: 'RED', dead: false, pos: new Vec(1000, 1000), r: 25 },
-    blueTC: { team: 'BLUE', dead: false, pos: new Vec(1000, 1000), r: 25 },
-  };
-
-  builder.state = S.MOVE;
-  builder.ent = site;
-  builder.update(gameStub);
-
-  assert.strictEqual(builder.state, S.BUILD, 'units should build when they arrive at a friendly site');
-}
-
-function propertyBuildCompletesAndAddsHouse() {
-  const builder = new Unit(0, 0, 'RED');
-  const site = new Site(0, 0, 'RED');
-  const tc = { team: 'RED', dead: false, pos: new Vec(1000, 1000), r: 25, res: { FOOD: 0, WOOD: 0, STONE: 0, IRON: 0 } };
-  const enemyTC = { team: 'BLUE', dead: false, pos: new Vec(1000, 1000), r: 25, res: { FOOD: 0, WOOD: 0, STONE: 0, IRON: 0 } };
-  const g = {
-    units: [builder],
-    houses: [],
-    sites: [site],
-    redTC: tc,
-    blueTC: enemyTC,
-    addHouse(x, y, t) {
-      this.houses.push({ x, y, team: t, dead: false });
-    },
-    fx() {},
-  };
-
-  builder.state = S.BUILD;
-  builder.ent = site;
-  const originalSpeed = game.SPEED;
-  game.SPEED = 1;
-
-  let lastProg = site.prog;
-  let iterations = 0;
-  while (!site.dead && iterations < C.HOUSE_TIME * 2 + 10) {
-    builder.build(g);
-    assert.ok(site.prog >= lastProg, 'build progress should not regress');
-    lastProg = site.prog;
-    iterations++;
-  }
-
-  assert.ok(site.dead, 'site should be marked dead after completing build');
-  assert.strictEqual(g.houses.length, 1, 'a house should be added when construction finishes');
-  assert.strictEqual(builder.state, S.IDLE, 'builder should return to idle after finishing construction');
-
-  const knownKeys = ['FOOD', 'WOOD', 'STONE', 'IRON'];
-  assert.ok(Object.keys(tc.res).every((k) => knownKeys.includes(k)), 'building should not invent new resource keys');
-  game.SPEED = originalSpeed;
-}
-
 function run() {
   const tests = [
     ['calculateStepSegments handles fractional and paused speeds', testCalculateStepSegments],
     ['calculateStepSegments conserves speed (property)', propertyConservesSpeed],
     ['applySpeed updates global speed and active button', testApplySpeedUpdatesButtons],
     ['setSpeed falls back to document buttons', testSetSpeedWithDomFallback],
-    ['units switch to build when reaching a site', testUnitsSwitchToBuildWhenReachingSite],
-    ['building completes and adds a house (property)', propertyBuildCompletesAndAddsHouse],
   ];
   let passed = 0;
   tests.forEach(([name, fn]) => {

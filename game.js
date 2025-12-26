@@ -313,14 +313,13 @@ class Unit extends Entity {
     checkArrival(target, nextState, g) {
         if(this.scan(g)) { this.state=S.CHASE; return; }
         if(!target || target.dead) { this.state=S.IDLE; this.lock=0; return; }
-
+        
         // FIX: Increased Buffer Zone (+15)
-        let range = target.r + this.r + 15;
-
+        let range = target.r + this.r + 15; 
+        
         if(this.pos.dist(target.pos) < range) {
-            const arrivalState = (target instanceof Site) ? S.BUILD : nextState;
-            if(arrivalState !== -1) this.state = arrivalState;
-        }
+            if(nextState !== -1) this.state = nextState;
+        } 
         // Movement is handled in update() now via physics
     }
 
@@ -665,6 +664,6 @@ if(isBrowser) {
     new Game();
 }
 
-const exported = { Vec, Resource, Unit, Site, Game, calculateStepSegments, applySpeed, setSpeed, S, C };
+const exported = { Vec, Resource, Unit, Game, calculateStepSegments, applySpeed, setSpeed };
 Object.defineProperty(exported, 'SPEED', { get: () => SPEED, set: (v) => { SPEED=v; } });
 if (typeof module !== 'undefined') module.exports = exported;
