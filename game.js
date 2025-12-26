@@ -7,8 +7,8 @@ const C = {
     CAPACITY: 15,
     BASE_POP: 10, HOUSE_POP: 5, MAX_UNITS: 200,
     HP_UNIT: 60, HP_HOUSE: 250, HP_TC: 1500,
-    DMG: { FIST: 3, SWORD: 10, GUN: 25 },
-    RNG: { MELEE: 22, GUN: 130 },
+    DMG: { FIST: 4, SWORD: 12, GUN: 25 },
+    RNG: { MELEE: 22, GUN: 140 },
     CD: { MELEE: 40, GUN: 90 },
     VISION: 250,
     INIT_RES: 180, INIT_SHEEP: 40
@@ -39,7 +39,7 @@ function applySpeed(newSpeed, buttons = []) {
     SPEED = newSpeed;
     globalThis.SPEED = SPEED;
     if (!buttons || typeof buttons.forEach !== 'function') return;
-    buttons.forEach(b => { b.className = b.value === newSpeed ? 'active' : ''; });
+    buttons.forEach(b => { b.className = b.value == newSpeed ? 'active' : ''; });
 }
 
 function setSpeed(s, buttons) {
@@ -47,7 +47,7 @@ function setSpeed(s, buttons) {
     applySpeed(s, buttons);
 }
 
-// --- MATH (NaN Safety Added) ---
+// --- MATH ---
 class Vec {
     constructor(x,y){this.x=x;this.y=y;}
     add(v){return new Vec(this.x+v.x,this.y+v.y);}
@@ -56,7 +56,6 @@ class Vec {
     mag(){return Math.hypot(this.x,this.y);}
     norm(){
         let m=this.mag(); 
-        // FIX: Prevent divide by zero (NaN errors)
         if (m < 0.001) return new Vec(0,0);
         return new Vec(this.x/m,this.y/m);
     }
@@ -169,7 +168,6 @@ class Site extends Entity {
     }
 }
 
-// --- UPDATED UNIT CLASS (Fixes Applied) ---
 class Unit extends Entity {
     constructor(x,y,team) {
         super(x,y,8);
@@ -182,31 +180,26 @@ class Unit extends Entity {
         this.inv={type:null,amt:0};
         this.cd=0;
         this.animOff = Math.random()*10;
-        
-        // FIX: Target Lock Timer (Prevents rapid state switching)
         this.lock = 0; 
     }
     
     update(g) {
-        // Decrease lock timer
         if(this.lock > 0) this.lock -= SPEED;
 
-        // --- PHYSICS FIX: Combine Separation + Seek ---
+        // --- Physics ---
         let separation = new Vec(0,0);
         let count = 0;
-        // Check neighbors for separation
         for(let u of g.units) {
             if(u === this) continue;
             let d = this.pos.dist(u.pos);
-            if(d < 16 && d > 0) { // 16px bubble
+            if(d < 16 && d > 0) {
                 let push = this.pos.sub(u.pos).norm();
                 separation = separation.add(push);
                 count++;
             }
         }
-        if(count > 0) separation = separation.mult(1.5); // Weight of separation
+        if(count > 0) separation = separation.mult(1.5); 
 
-        // Determine seek vector based on state
         let seek = new Vec(0,0);
         let targetPos = null;
 
@@ -216,23 +209,21 @@ class Unit extends Entity {
             targetPos = this.dest;
         }
 
-        if (targetPos) {
-            seek = targetPos.sub(this.pos).norm();
-        }
+        if (targetPos) seek = targetPos.sub(this.pos).norm();
 
-        // Combine Forces (Seek is dominant, separation is modifier)
         let finalDir = seek.add(separation).norm();
-        let moveSpeed = 1.2 * SPEED;
-        
-        // Actually move
         if (targetPos || count > 0) {
-            this.pos = this.pos.add(finalDir.mult(moveSpeed));
+            this.pos = this.pos.add(finalDir.mult(1.2 * SPEED));
         }
 
-        // --- LOGIC ---
+        // --- Logic ---
         switch(this.state) {
             case S.IDLE: this.findJob(g); break;
-            case S.MOVE: this.checkArrival(this.ent, S.GATHER, g); break;
+            case S.MOVE: 
+                // BUG FIX: Intelligently decide next state based on target type
+                let next = (this.ent instanceof Site) ? S.BUILD : S.GATHER;
+                this.checkArrival(this.ent, next, g); 
+                break;
             case S.GATHER: this.gather(g); break;
             case S.DEPOSIT: this.checkArrival(this.ent, -1, g); if(this.ent && this.pos.dist(this.ent.pos)<50) this.deposit(g); break;
             case S.BUILD: this.build(g); break;
@@ -248,7 +239,7 @@ class Unit extends Entity {
 
     findJob(g) {
         if(this.scan(g)) { this.state=S.CHASE; return; }
-        if(this.lock > 0) return; // Don't switch jobs if locked (unless enemy found)
+        if(this.lock > 0) return;
 
         let tc = this.team==='RED'?g.redTC:g.blueTC;
         if(tc.dead) { this.dest=this.pos; this.state=S.WANDER; return; }
@@ -256,9 +247,11 @@ class Unit extends Entity {
         let myPop = g.units.filter(u=>u.team===this.team).length;
         let myCap = C.BASE_POP + g.houses.filter(h=>h.team===this.team).length * C.HOUSE_POP;
         
+        // 1. Build priority
         let site = g.sites.find(s=>s.team===this.team);
         if(site) { this.ent=site; this.state=S.MOVE; this.lock=60; return; }
 
+        // 2. Resource priority
         let type = 'WOOD';
         if(myPop >= myCap - 2) type = 'WOOD';
         else if(tc.res.FOOD < C.SPAWN.FOOD) type='SHEEP';
@@ -279,7 +272,7 @@ class Unit extends Entity {
         if(best) { 
             this.ent=best; 
             this.state=S.MOVE; 
-            this.lock = 100; // Commit to this resource for ~1.5s
+            this.lock = 100;
         }
         else {
             this.dest = this.pos.add(new Vec(Math.random()*100-50, Math.random()*100-50));
@@ -289,7 +282,6 @@ class Unit extends Entity {
     }
 
     scan(g) {
-        // Combat scan has priority
         let best=null, dist=C.VISION;
         for(let u of g.units) {
             if(u.team!==this.team && !u.dead) {
@@ -314,23 +306,28 @@ class Unit extends Entity {
         if(this.scan(g)) { this.state=S.CHASE; return; }
         if(!target || target.dead) { this.state=S.IDLE; this.lock=0; return; }
         
-        // FIX: Increased Buffer Zone (+15)
         let range = target.r + this.r + 15; 
-        
         if(this.pos.dist(target.pos) < range) {
             if(nextState !== -1) this.state = nextState;
         } 
-        // Movement is handled in update() now via physics
     }
 
     gather(g) {
         if(this.scan(g)) { this.state=S.CHASE; return; }
         if(!this.ent || this.ent.dead) { this.state=S.IDLE; this.lock=0; return; }
         
+        // Sanity Check: Don't mix resources
+        let targetType = this.ent.type==='SHEEP'?'FOOD':this.ent.type;
+        if(this.inv.amt > 0 && this.inv.type !== targetType) {
+            this.ent = (this.team==='RED'?g.redTC:g.blueTC);
+            this.state = S.DEPOSIT;
+            return;
+        }
+
         this.cd += SPEED;
         if(this.cd > 15) {
             this.cd = 0;
-            if(this.inv.amt===0) this.inv.type = this.ent.type==='SHEEP'?'FOOD':this.ent.type;
+            if(this.inv.amt===0) this.inv.type = targetType;
             this.ent.amt -= 5;
             this.inv.amt += 5;
             if(this.ent.type==='SHEEP') g.fx(this.ent.pos.x,this.ent.pos.y,'#c0392b',2); 
@@ -356,7 +353,6 @@ class Unit extends Entity {
         let rng = (this.weap==='GUN'?C.RNG.GUN:C.RNG.MELEE) + this.ent.r;
         
         if(d <= rng) this.state = S.ATTACK;
-        // else physics moves us closer
     }
 
     attack(g) {
@@ -374,7 +370,6 @@ class Unit extends Entity {
             let dmg = C.DMG[this.weap];
             if(this.weap==='GUN') {
                 g.bullet(this.pos, this.ent, dmg);
-                // Simple Recoil
                 let recoil = this.ent.pos.sub(this.pos).norm().mult(-2);
                 this.pos = this.pos.add(recoil);
             } else {
@@ -420,9 +415,12 @@ class Unit extends Entity {
 
         ctx.fillStyle = '#f5cba7'; ctx.beginPath(); ctx.arc(0,-6,4,0,6.28); ctx.fill();
 
-        if(this.state===S.ATTACK) ctx.rotate(Math.sin(TIME*0.5)*0.5);
+        // Weapon
+        if(this.state===S.ATTACK || this.state===S.BUILD) ctx.rotate(Math.sin(TIME*0.5)*0.5);
         ctx.translate(3,0);
-        if(this.weap==='GUN') {
+        if(this.state===S.BUILD) {
+            ctx.fillStyle='#aaa'; ctx.fillRect(0,-6,2,10); ctx.fillRect(-2,-8,6,3); // Hammer
+        } else if(this.weap==='GUN') {
             ctx.fillStyle='#111'; ctx.fillRect(0,-2,12,3);
         } else if(this.weap==='SWORD') {
             ctx.fillStyle='#bdc3c7'; ctx.fillRect(0,-8,2,12);
@@ -462,8 +460,8 @@ class Game {
         this.res=[]; this.sheep=[]; this.units=[]; this.houses=[]; this.sites=[]; 
         this.fxs=[]; this.txts=[]; this.projs=[]; this.corpses=[];
         
-        this.redTC = new TC(this.w*0.3, this.h/2, 'RED');
-        this.blueTC = new TC(this.w*0.7, this.h/2, 'BLUE');
+        this.redTC = new TC(this.w*0.4, this.h/2, 'RED');
+        this.blueTC = new TC(this.w*0.6, this.h/2, 'BLUE');
         
         for(let i=0;i<C.INIT_RES;i++) this.spawnRes();
         for(let i=0;i<C.INIT_SHEEP;i++) this.spawnSheep();
@@ -617,7 +615,7 @@ class Game {
         });
         this.ctx.globalAlpha=1;
     }
-
+    
     loop() {
         const { iterations, subStep } = calculateStepSegments(SPEED);
         if(iterations === 0) { requestAnimationFrame(()=>this.loop()); return; }
